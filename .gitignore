@@ -10,3 +10,5 @@ BUILD/
 # Log files
 *.log
 
+BUILD
+mbed-os
