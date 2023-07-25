@@ -1,17 +1,102 @@
 #include "max32625.h"
 #include "mbed.h"
 #include <cstdio>
-#include <stdio.h>
 #include "MAX2871.h"
 #include "max2871_registers.h"
+#include <ratio>
+#include <stdio.h>
 
-int main() {
-    
+   
 #define D6   P0_6
 #define D8   P1_4
 #define D9   P1_5
 
-    
+#define ADIV    4
+
+
+char message[256] = {0};
+
+
+long long gcd(long long a, long long b)
+{
+    if (a == 0)
+        return b;
+    else if (b == 0)
+        return a;
+    if (a < b)
+        return gcd(a, b % a);
+    else
+        return gcd(b, a % b);
+}
+
+
+struct Numdennom {
+        int f, m;
+    };
+
+typedef struct Numdennom synthratio;
+
+
+//Function to convert decimal to fraction
+synthratio decimalToFraction(double number)
+{
+    // Fetch integral value of the decimal
+    double intVal = floor(number);
+    synthratio  s;
+ 
+    // Fetch fractional part of the decimal
+    double fVal = number - intVal;
+ 
+    // Consider precision value to
+    // convert fractional part to
+    // integral equivalent
+    const long pVal = 1000000000;
+ 
+    // Calculate GCD of integral
+    // equivalent of fractional
+    // part and precision value
+    long long gcdVal
+        = gcd(round(fVal * pVal), pVal);
+ 
+    // Calculate num and deno
+    long long num
+        = round(fVal * pVal) / gcdVal;
+    long long deno = pVal / gcdVal;
+ 
+    // Print the fraction
+    s.f = num;
+    s.m = deno;
+
+    return(s);
+}
+void cget_message(BufferedSerial *pc, DigitalOut  led, char *buffer) {
+        char cbuffer = {0};
+        int i = 0;
+
+        while (cbuffer != '\r') {
+            while (!pc->readable()) {}
+            if (uint32_t num = pc->read(&cbuffer, sizeof(cbuffer))) {
+                // Toggle the LED.
+                led = !led;
+
+                // Echo the input back to the terminal.
+                if (cbuffer != '\b') {
+                    pc->write(&cbuffer, num);
+                    buffer[i++] = cbuffer;
+                }
+            }
+        }
+}
+
+void clear_message(BufferedSerial *pc ) {
+        for (int i=0;i<sizeof(message);i++) {
+            message[i] = 0;
+        }
+        pc->write(message,sizeof(message));
+}
+
+int main() {
+
     SPI         spi(SPI1_MOSI,SPI1_MISO,SPI1_SCK);           //mosi, miso, sclk (P1.2, P1.1, P1.0)
     BufferedSerial   pc(CONSOLE_TX,CONSOLE_RX,115200);       //tx, rx, baud
 
@@ -24,15 +109,15 @@ int main() {
     
     static double freq_entry;               //variable to store user frequency input
     char buffer[256] = {0};                 //array to hold string input from terminal
-    char cbuffer = {0};
-    char message[256] = {0};
 
 
-    double v_tune, temperature, pfd;         //stores TUNE voltage and die temperature of MAX2871
-    uint32_t vco;                       //stores active VCO in use
-    double freq_rfouta;                 //variable to calculate ouput frequency from register settings
+    double v_tune, temperature;         //stores TUNE voltage and die temperature of MAX2871
+    uint32_t vco, ndiv;                       //stores active VCO in use
+    double freq_rfouta, pfd = 50.0;     //variable to calculate ouput frequency from register settings
+    double  fvco_fpfd, fract, fout_synth;
 
-    static int i;
+    int i;
+   
 
     spi.format(8,0);                    //CPOL = CPHA = 0, 8 bits per frame
     spi.frequency(1000000);             //1 MHz SPI clock
@@ -48,40 +133,61 @@ int main() {
     max2871_regs.max2871Set_INT(0);     //set individual bits
 
 
+
+
     //The routine in the while(1) loop will ask the user to input a desired
     //output frequency, check that it is in range, calculate the corresponding
     //register settings, update the MAX2871 registers, and then independently
     //use the programmed values to re-calculate the output frequency chosen
     while(1){
 
+        sprintf(message,"\n\rEnter a pfd freq in MHz: (%2.3f, R=1)",pfd);
+        pc.write(message,sizeof(message));
+        clear_message(&pc);
+
+        cget_message(&pc, led, buffer);
+
+        pfd = floor(1000*atof(buffer))/1000; 
+
         sprintf(message,"\n\rEnter a freq in MHz:");
         pc.write(message,sizeof(message));
+        clear_message(&pc);
 
-        i=0;
-        cbuffer = 0;
-        while (cbuffer != '\r') {
-            while (!pc.readable()) {}
-            if (uint32_t num = pc.read(&cbuffer, sizeof(cbuffer))) {
-                // Toggle the LED.
-                led = !led;
-
-                // Echo the input back to the terminal.
-                pc.write(&cbuffer, num);
-                buffer[i++] = cbuffer;
-            }
-        }
+        cget_message(&pc, led, buffer);
 
         freq_entry = floor(1000*atof(buffer))/1000;         //convert string to a float with 1kHz precision
         if((freq_entry < 23.5) || (freq_entry > 6000.0)) {   //check the entered frequency is in MAX2871 range
             sprintf(message,"\n\rNot a valid frequency entry.");
             pc.write(message,sizeof(message));
+            clear_message(&pc);
+
         }
         else
         {
+            fvco_fpfd = ADIV*freq_entry/pfd;
+            ndiv = floor(fvco_fpfd);
+            fract = fvco_fpfd-ndiv;
+            sprintf(message,"\n\rfvco_fpfd: %f, ndiv: %d",fvco_fpfd, ndiv);   //report the frequency derived from user's input
+            pc.write(message,sizeof(message));
+            clear_message(&pc);
+
+            synthratio ratio;
+            ratio = decimalToFraction(fract);
+            fout_synth = (ndiv+(float)ratio.f/ratio.m)*pfd/ADIV;
+
+            sprintf(message,"\n\rfract: %f, f: %d  m: %d",fract, ratio.f,ratio.m);   //report the frequency derived from user's input
+            pc.write(message,sizeof(message));
+            clear_message(&pc);
+
+
             sprintf(message,"\n\rTarget: %.3f MHz\n\r",freq_entry);   //report the frequency derived from user's input
             pc.write(message,sizeof(message));
 
-            max2871.setPFD(50,1);                       //update MAX2871 registers for new frequency
+            sprintf(message,"\n\rRatio Target: %.3f MHz\n\r",fout_synth);   //report the frequency derived from user's input
+            pc.write(message,sizeof(message));
+
+
+            max2871.setPFD(pfd,1);                       //update MAX2871 registers for new frequency
 
             max2871.setRFOUTA(freq_entry);                  //update MAX2871 registers for new frequency
 
@@ -105,10 +211,6 @@ int main() {
             sprintf(message,"\n\rVTUNE: %.3f V, VCO: %d, TEMP: %f\n\r",v_tune,vco,temperature);
             pc.write(message,sizeof(message));
         }
-        for (i=0;i<sizeof(message);i++) {
-            message[i] = 0;
-        }
-        pc.write(message,sizeof(message));
-
+        clear_message(&pc);
     }   
 }
